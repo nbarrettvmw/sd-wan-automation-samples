@@ -48,12 +48,14 @@ def get_link_data(s: Session, shared: CommonData) -> list[LinkData]:
         shared,
         "monitoring/getAggregateEdgeLinkMetrics",
         params={
+            # comment out the following line to get all available metrics
             "metrics": ["bpsOfBestPathRx", "bpsOfBestPathTx"],
             "interval": {
                 "start": start_time,
             },
         },
     )
+    print(json.dumps(resp, indent=2))
     return [
         LinkData(
             l["link"]["edgeId"],
@@ -94,7 +96,7 @@ def extract_module(module_stack: list[dict], module_name: str) -> dict | None:
     return next((m for m in module_stack if m["name"] == module_name), None)
 
 
-def audit_links(s: Session, shared: CommonData):
+def audit_links(s: Session, shared: CommonData, apply_changes=False):
     # fetch the link metrics and build pandas frame
     links_df = pd.DataFrame(get_link_data(s, shared))
 
@@ -109,45 +111,69 @@ def audit_links(s: Session, shared: CommonData):
         & (links_df["downstream_mbps"] > 175.0)
         & (links_df["upstream_mbps"] < 175.0)
     ]
+
     affected_edges = affected_links.groupby("edge_id")
 
-    print(f"{len(affected_links)} affected links found on {len(affected_edges)} edges")
+    print(f"{len(affected_links)} potentially affected links found on {len(affected_edges)} edges")
+    print("checking configuration on those edges to confirm...")
+    if not apply_changes:
+        print("- not applying configuration changes due to audit-only mode")
+
+    affected_links_output = None
 
     for edge_id, df in affected_edges:
+        # don't spam getEdgeConfigurationStack
+        time.sleep(1)
+
         edge_stack = get_edge_stack(s, shared, cast(int, edge_id))
-        # edge-specific config is 0th element
+        # edge-specific config is always 0th element
         edge_config = edge_stack[0]
 
         wan_module = extract_module(edge_config["modules"], "WAN")
         if wan_module is None:
             continue
 
-        # pandas way to retrieve edge_name from first row
+        # retrieve edge_name scalar from first row
         edge_name = df["edge_name"].head(1).item()
 
         wan_id = wan_module["id"]
         wan_data = wan_module["data"]
         wan_links = wan_data["links"]
 
-        should_update_module = False
+        # array to track affected link names
+        confirmed_affected_link_names = []
+
+        affected_link_was_found = False
         for wan_link in wan_links:
             if wan_link["bwMeasurement"] != "SLOW_START":
                 continue
 
             link_internal_id = wan_link["internalId"]
 
-            # pandas way to check if a value exists in a column
+            # check if this link exists in the candidate list
             id_series = df["link_internal_id"]
             if len(id_series.where(id_series == link_internal_id)) > 0:
-                link_name = wan_link["name"]
-                print(f"updating edge [{edge_name}] link [{link_name}]")
+                # get the dataframe for this link
+                link_row = df.loc[df["link_internal_id"] == link_internal_id]
+                affected_links_output = pd.concat([affected_links_output, link_row])
+
+                # save link name to display later
+                confirmed_affected_link_names.append(wan_link["name"])
+
                 # STATIC means burst mode
                 wan_link["bwMeasurement"] = "STATIC"
-                # set flag to update the module once done iterating over links
-                should_update_module = True
 
-        if should_update_module:
-            update_module(s, shared, wan_id, wan_data)
+                # set flag to update the module once done iterating over links
+                affected_link_was_found = True
+
+        if affected_link_was_found:
+            updated_links_text = ", ".join(confirmed_affected_link_names)
+            print(f"confirmed as affected - edge [{edge_name}] - link(s) [{updated_links_text}]")
+            if apply_changes:
+                print("- applying fix to WAN module")
+                update_module(s, shared, wan_id, wan_data)
+
+        affected_links_output.to_csv('affected_links.csv')
 
 
 def readenv(name: str) -> str:
@@ -162,4 +188,4 @@ shared = CommonData(readenv("VCO"), readenv("VCO_TOKEN"))
 s = session()
 s.headers.update({"Authorization": f"Token {shared.token}"})
 
-audit_links(s, shared)
+audit_links(s, shared, apply_changes=False)
