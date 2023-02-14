@@ -55,7 +55,9 @@ def get_link_data(s: Session, shared: CommonData) -> list[LinkData]:
             },
         },
     )
-    print(json.dumps(resp, indent=2))
+    
+    #print(json.dumps(resp, indent=2))
+    
     return [
         LinkData(
             l["link"]["edgeId"],
