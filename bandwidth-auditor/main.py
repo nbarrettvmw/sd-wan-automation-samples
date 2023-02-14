@@ -57,7 +57,7 @@ def get_link_data(s: Session, shared: CommonData) -> list[LinkData]:
     )
     
     #print(json.dumps(resp, indent=2))
-    
+
     return [
         LinkData(
             l["link"]["edgeId"],
@@ -116,12 +116,13 @@ def audit_links(s: Session, shared: CommonData, apply_changes=False):
 
     affected_edges = affected_links.groupby("edge_id")
 
-    print(f"{len(affected_links)} potentially affected links found on {len(affected_edges)} edges")
+    print(f"{len(affected_links)} potentially affected link(s) found on {len(affected_edges)} edge(s)")
     print("checking configuration on those edges to confirm...")
     if not apply_changes:
         print("- not applying configuration changes due to audit-only mode")
 
     affected_links_output = None
+    affected_links_output_list = []
 
     for edge_id, df in affected_edges:
         # don't spam getEdgeConfigurationStack
@@ -157,7 +158,7 @@ def audit_links(s: Session, shared: CommonData, apply_changes=False):
             if len(id_series.where(id_series == link_internal_id)) > 0:
                 # get the dataframe for this link
                 link_row = df.loc[df["link_internal_id"] == link_internal_id]
-                affected_links_output = pd.concat([affected_links_output, link_row])
+                affected_links_output_list.append(link_row)
 
                 # save link name to display later
                 confirmed_affected_link_names.append(wan_link["name"])
@@ -175,7 +176,8 @@ def audit_links(s: Session, shared: CommonData, apply_changes=False):
                 print("- applying fix to WAN module")
                 update_module(s, shared, wan_id, wan_data)
 
-        affected_links_output.to_csv('affected_links.csv')
+    affected_links_output = pd.concat(affected_links_output_list)
+    affected_links_output.to_csv('affected_links.csv')
 
 
 def readenv(name: str) -> str:
