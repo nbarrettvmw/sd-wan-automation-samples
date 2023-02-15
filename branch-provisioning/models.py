@@ -46,11 +46,9 @@ class BranchData:
     postal_code: str
     contact_name: str
     contact_email: str
+    serial_number: str
     transit_net: IPv4Network
     corporate_nets: list[IPv4Network]
-    byod_net: IPv4Network
-    guest_net: IPv4Network
-    wans: tuple[WanData, WanData]
 
 
 @dataclass
