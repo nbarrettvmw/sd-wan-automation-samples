@@ -8,7 +8,7 @@ import uuid
 
 from api import *
 from models import BranchData, CommonData, WanData
-from util import calculate_lat_lon
+from util import calculate_lat_lon, extract_module, ipv4_address, ipv4_network
 
 
 def generate_wan_overlay(wan_data: tuple[WanData, WanData]):
@@ -143,7 +143,17 @@ def build_wan_patch(wan: WanData, interface_name: str, current_ds: dict) -> list
         {
             "op": "replace",
             "path": f"/routedInterfaces/{interface_index}/l2/probeInterval",
-            "value": "3",
+            "value": "5",
+        },
+        {
+            "op": "add",
+            "path": f"/routedInterfaces/{interface_index}/l2/losDetection",
+            "value": False,
+        },
+        {
+            "op": "add",
+            "path": f"/routedInterfaces/{interface_index}/override",
+            "value": True,
         },
     ]
 
@@ -222,12 +232,87 @@ def build_ge2_patch(branch: BranchData, current_ds: dict) -> list[dict]:
     ]
 
 
-def build_zscaler_patch(branch_data: BranchData) -> list[dict]:
-    return []
+# pre-provisioning of ZS is limited
+# VCO will auto-populate some fields once the edge activates
+# - refs/deviceSettings:css:site, refs/deviceSettings:zscaler:location
+# - data/segments/0/css/sites (1 created per WAN), data/zscaler/deployment/location (only 1 created)
+# - notably, data/zscaler/config is a bare template
+# Once these configurations are populated, it will take the VCE 10-30 minutes for tunnels to establish
+# - This is because ZScaler takes a long time to provision the VPN. You can see in the logs that IKE is failing.
+# sub-locations may be added after activation is complete
+# - ideally after the tunnels are up
+# this is done using a single deviceSettings update
+# - in data, /zscaler/deployment is un-touched
+# - in data, /zscaler/config is modified to include
+# - remove old css:site & zscaler:location refs, they must be re-created. VCO will do this.
 
 
-def extract_module(module_stack: list[dict], module_name: str) -> Optional[dict]:
-    return next((m for m in module_stack if m["name"] == module_name), None)
+def build_zscaler_data_patch(
+    branch_data: BranchData, shared: CommonData, current_data: dict
+) -> list[dict]:
+    # TODO: pull sublocations from branch_data
+    sublocations = [
+        {
+            "gwProperties": {
+                "aupEnabled": False,
+                "authRequired": True,
+                "cautionEnabled": False,
+                "dnBandwidth": 5000,
+                "ipsControl": True,
+                "ofwEnabled": True,
+                "surrogateIP": False,
+                "surrogateIPEnforcedForKnownBrowsers": False,
+                "upBandwidth": 5000,
+            },
+            "includeAllLanInterfaces": True,
+            "includeAllVlans": True,
+            "internalId": "",
+            "ipAddresses": ["10.0.0.0/30"],
+            "ipAddressSelectionManual": True,
+            "lanRoutedInterfaces": ["GE2"],
+            "name": "CorpNets",
+            "ruleId": "",
+            "vlans": [],
+        },
+    ]
+    return [
+        {
+            "op": "replace",
+            "path": "/zscaler/config/cloud",
+            "value": "zscalerthree.net",  # TODO: parameterize
+        },
+        {
+            "op": "replace",
+            "path": "/zscaler/config/enabled",
+            "value": True,
+        },
+        {
+            "op": "replace",
+            "path": "/zscaler/config/provider",
+            "value": {
+                "logicalId": shared.zscaler_cloud_subscription_logical_id,
+                "ref": "deviceSettings:zscaler:iaasSubscription",
+            },
+        },
+        {
+            "op": "replace",
+            "path": "/zscaler/config/sublocations",
+            "value": sublocations,
+        },
+    ]
+
+
+def build_zscaler_refs_patch(branch_data: BranchData) -> list[dict]:
+    return [
+        {
+            "op": "remove",
+            "path": "/deviceSettings:css:site",
+        },
+        {
+            "op": "remove",
+            "path": "/deviceSettings:zscaler:location",
+        },
+    ]
 
 
 def provision_branch(s: Session, shared: CommonData, branch: BranchData):
@@ -281,8 +366,8 @@ def provision_branch(s: Session, shared: CommonData, branch: BranchData):
         ge3_patch = build_wan_patch(branch.wans[0], "GE3", edge_ds_data)
         ge4_patch = build_wan_patch(branch.wans[1], "GE4", edge_ds_data)
         ge2_patch = build_ge2_patch(branch, edge_ds_data)
-        zscaler_patch = build_zscaler_patch(branch)
 
+        # zscaler cannot be done until edge is activated
         patch_set = jsonpatch.JsonPatch(
             [
                 *static_routes_patch,
@@ -290,7 +375,6 @@ def provision_branch(s: Session, shared: CommonData, branch: BranchData):
                 *ge3_patch,
                 *ge4_patch,
                 *ge2_patch,
-                *zscaler_patch,
             ]
         )
         patch_set.apply(edge_ds_data, in_place=True)
@@ -305,30 +389,57 @@ def provision_branch(s: Session, shared: CommonData, branch: BranchData):
         new_edge_wan_data = generate_wan_overlay(branch.wans)
         update_configuration_module(s, shared, edge_wan_id, new_edge_wan_data)
 
-        print("Provisioning complete")
+        quit_key = input(
+            "pre-provisioning complete. press enter to continue to ZScaler provisioning, any other key to exit: "
+        )
+        if quit_key == "":
+            print("Exiting")
+            return
+
+        print("ZScaler not implemented yet")
+        return
+
+        print("proceeding with ZScaler configuration...")
+
+        # TODO: poll configuration stack repeatedly
+        # wait for edge/modules/deviceSettings/data/segments/0/css to appear
+        # this indicates that the VCO finished backend API to ZScaler
+        # for now, just don't press enter unless the edge is activated and has the CSS provisioned
+
+        edge_config_stack = get_configuration_stack(s, shared, edge_id)
+        edge_specific_config = edge_config_stack[0]
+
+        edge_ds = extract_module(edge_specific_config["modules"], "deviceSettings")
+        if edge_ds is None:
+            raise LookupError("could not find deviceSettings module")
+        edge_ds_id = edge_ds["id"]
+
+        edge_ds_data = edge_ds["data"]
+        edge_ds_refs = edge_ds["refs"]
+
+        data_patch_set = jsonpatch.JsonPatch(
+            build_zscaler_data_patch(branch, shared, edge_ds_data)
+        )
+        refs_patch_set = jsonpatch.JsonPatch(build_zscaler_refs_patch(branch))
+        data_patch_set.apply(edge_ds_data, in_place=True)
+        refs_patch_set.apply(edge_ds_refs, in_place=True)
+
+        update_configuration_module(s, shared, edge_ds_id, edge_ds_data, edge_ds_refs)
 
     finally:
         return
 
 
-def ipv4_network(net: str) -> IPv4Network:
-    return cast(IPv4Network, ip_network(net))
-
-
-def ipv4_address(addr: str) -> IPv4Address:
-    return cast(IPv4Address, ip_address(addr))
-
-
 branch_data = BranchData(
-    "test edge 777",
+    "test edge 778",
     "US",
     "62269",
     "Nick Barrett",
     "nbarrett@vmware.com",
-    ipv4_network("10.0.0.0/30"),
-    [ipv4_network("172.16.10.0/24")],
-    ipv4_network("192.168.200.0/24"),
-    ipv4_network("192.168.201.0/24"),
+    ipv4_network("10.0.0.4/30"),
+    [ipv4_network("172.16.11.0/24")],
+    ipv4_network("192.168.202.0/24"),
+    ipv4_network("192.168.203.0/24"),
     (
         WanData(
             "ISP-A",
@@ -340,9 +451,9 @@ branch_data = BranchData(
         ),
         WanData(
             "ISP-B",
-            ipv4_network("172.16.0.4/30"),
-            ipv4_address("172.16.0.6"),
-            ipv4_address("172.16.0.5"),
+            ipv4_network("192.168.12.0/24"),
+            ipv4_address("192.168.12.240"),
+            ipv4_address("192.168.12.1"),
             50,
             50,
         ),
@@ -361,6 +472,7 @@ shared = CommonData(
     read_env("VCO"),
     read_env("VCO_TOKEN"),
     read_env("ENT_LOG_ID"),
+    read_env("ZS_CLOUD_SUB_LOG_ID"),
     read_env("BRANCH_PROF_LOG_ID"),
     read_env("BRANCH_LIC_LOG_ID"),
     read_env("GOOGLE_MAPS_API_KEY"),

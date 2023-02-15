@@ -13,6 +13,7 @@ class CommonData:
     vco: str
     token: str
     enterprise_logical_id: str
+    zscaler_cloud_subscription_logical_id: str
     branch_profile_logical_id: str
     branch_license_logical_id: str
     google_maps_api_key: str
@@ -21,6 +22,7 @@ class CommonData:
         assert self.vco is not None
         assert self.token is not None
         assert self.enterprise_logical_id is not None
+        assert self.zscaler_cloud_subscription_logical_id is not None
         assert self.branch_profile_logical_id is not None
         assert self.branch_license_logical_id is not None
         assert self.google_maps_api_key is not None

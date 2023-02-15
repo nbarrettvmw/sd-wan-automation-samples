@@ -46,17 +46,23 @@ def get_configuration_stack(s: Session, shared: CommonData, edge_id: int) -> lis
 
 
 def update_configuration_module(
-    s: Session, shared: CommonData, configuration_module_id: int, new_data: dict
+    s: Session,
+    shared: CommonData,
+    configuration_module_id: int,
+    new_data: dict,
+    new_refs: dict | None = None,
 ):
+    update = {"data": new_data}
+    if new_refs is not None:
+        update["refs"] = new_refs
+
     do_portal(
         s,
         shared,
         "configuration/updateConfigurationModule",
         params={
             "id": configuration_module_id,
-            "_update": {
-                "data": new_data,
-            },
+            "_update": update,
         },
     )
 
